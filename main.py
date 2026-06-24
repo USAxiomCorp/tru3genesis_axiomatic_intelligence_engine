@@ -51,5 +51,19 @@ def run_demo():
     print("DETERMINISTIC PROCESS COMPLETION VERIFIED")
     print("=" * 70)
 
+# ──────────────────────────────────────────────────────────────────────────────
+# AT THE ENDING: Render Port Scanner Alignment Block
+# ──────────────────────────────────────────────────────────────────────────────
+import os
+from http.server import SimpleHTTPRequestHandler, HTTPServer
+
 if __name__ == "__main__":
+    # 1. Your core engine demo executes first
     run_demo()
+    
+    # 2. This block runs at the ending to bind Render's port and keep it green
+    port = int(os.environ.get("PORT", 8080))
+    print(f"\n✓ Script complete. Binding port {port} to satisfy Render scanner...")
+    
+    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+    server.serve_forever()
