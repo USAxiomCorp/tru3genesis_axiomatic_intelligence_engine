@@ -1,4 +1,3 @@
-"""
 Sovereign Axiomatic Intelligence — Zero-dependency HTTP server.
 WAD 10^18 fixed-point constitutional mathematics.
 Pure Python stdlib only.
