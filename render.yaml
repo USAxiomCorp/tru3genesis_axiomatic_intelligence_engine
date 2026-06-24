@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: axiomatic-intelligence-engine
+    env: python
+    buildCommand: "# No external dependencies - zero overhead"
+    startCommand: "python main.py"
+    plan: free
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
