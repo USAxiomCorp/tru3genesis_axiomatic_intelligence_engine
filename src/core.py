@@ -1,10 +1,20 @@
+import os
+import json
+import urllib.request
+import urllib.error
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple, Callable
 import hashlib
-import json
 from decimal import Decimal
 from src.wad_math import W, ZERO, wad_mul, wad_div, wad_abs, wad_to_float
 from src.axioms import Axiom, AxiomSet
+
+# --- Claude API config (stdlib-only client, no `anthropic` / `requests` dep) ---
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_TIMEOUT_SECONDS = 30
+
 
 @dataclass
 class Proposition:
@@ -58,11 +68,96 @@ class Reasoner:
         return matches if matches else self.axioms.axioms[:3]
 
     def _apply_logic(self, query: str, axioms: List[Axiom], context: Optional[List[Proposition]] = None) -> Tuple[str, List[str]]:
+        """
+        Generates the actual reasoning content. Tries a live Claude call first
+        (grounded in the axioms the lookup step matched); falls back to the
+        deterministic local template if no API key is configured or the call
+        fails, so the engine never breaks.
+        """
+        if ANTHROPIC_API_KEY:
+            try:
+                return self._apply_logic_claude(query, axioms, context)
+            except Exception as e:
+                return self._apply_logic_local(query, axioms, context, error=str(e))
+        return self._apply_logic_local(query, axioms, context)
+
+    def _apply_logic_claude(self, query: str, axioms: List[Axiom], context: Optional[List[Proposition]] = None) -> Tuple[str, List[str]]:
+        axiom_block = "\n".join(f"- {a.id} ({a.name}): {a.statement}" for a in axioms)
+        context_block = ""
+        if context:
+            context_block = (
+                "\nPrior derivations in this session (for continuity, do not restate):\n"
+                + "\n".join(f"- {p.content}" for p in context[-5:])
+            )
+
+        system_prompt = (
+            "You are the reasoning layer of an axiomatic inference engine. "
+            "You must derive a conclusion for the user's query using ONLY the "
+            "axioms provided below as your ground truth. Do not introduce facts "
+            "that are not implied by these axioms.\n\n"
+            f"Axioms in scope:\n{axiom_block}\n"
+            f"{context_block}\n\n"
+            "Respond ONLY with a JSON object, no prose outside it, no markdown "
+            "fences, in exactly this shape:\n"
+            '{"conclusion": "<one dense paragraph stating the derived conclusion>", '
+            '"steps": ["<step 1>", "<step 2>", "..."]}\n'
+            "Each step should be a short explicit inference, ending with a final "
+            "step that states the conclusion is derived."
+        )
+
+        payload = json.dumps({
+            "model": ANTHROPIC_MODEL,
+            "max_tokens": 1000,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": query}],
+        }).encode("utf-8")
+
+        request = urllib.request.Request(
+            ANTHROPIC_API_URL,
+            data=payload,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+            },
+        )
+
+        with urllib.request.urlopen(request, timeout=ANTHROPIC_TIMEOUT_SECONDS) as response:
+            raw = json.loads(response.read().decode("utf-8"))
+
+        text_blocks = [
+            block.get("text", "")
+            for block in raw.get("content", [])
+            if block.get("type") == "text"
+        ]
+        text = "".join(text_blocks).strip()
+
+        # Model is instructed to return raw JSON, but strip fences defensively.
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+
+        parsed = json.loads(text)
+        conclusion = parsed["conclusion"].strip()
+        steps = [str(s) for s in parsed.get("steps", [])]
+
+        content = f"[claude:{ANTHROPIC_MODEL}] {conclusion}"
+        derivation_steps = [f"Query: {query}"] + steps
+        if not derivation_steps or "conclusion" not in derivation_steps[-1].lower():
+            derivation_steps.append("Conclusion: Derivation complete.")
+        return content, derivation_steps
+
+    def _apply_logic_local(self, query: str, axioms: List[Axiom], context: Optional[List[Proposition]] = None, error: Optional[str] = None) -> Tuple[str, List[str]]:
         base = f"Based on axioms: {', '.join(a.name for a in axioms)}"
         derivations = [f"Query: {query}"] + [f"Axiom {a.id}: {a.statement}" for a in axioms]
         if context:
             derivations.append(f"Context: {len(context)} previous propositions")
             base += f" — informed by {len(context)} prior derivations"
+        if error:
+            derivations.append(f"Claude call failed, used local fallback: {error}")
         derivations.append("Conclusion: Derivation complete.")
         return base, derivations
 
